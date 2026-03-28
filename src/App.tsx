@@ -25,8 +25,8 @@ const WORKS = [
     category: 'アプリ',
     desc: '継続日数・称号・カレンダーで禁欲をサポートするウェブアプリ。サイバー風UIとテーマ切替機能を搭載。',
     tags: ['React', 'TypeScript', 'Supabase'],
-    link: '/apps/zinyoku',
-    internal: true,
+    link: 'https://zinyoku-app.vercel.app',
+    internal: false,
     color: '#00f0ff',
   },
 ]
