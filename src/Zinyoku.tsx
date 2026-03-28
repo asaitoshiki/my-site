@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
+import { supabase } from './supabase'
 
 const TITLES = [
   { days: 0,    name: '本能の奴隷' },
@@ -46,7 +47,15 @@ const THEMES: { [K in ThemeKey]: Theme } = {
   vintage: { name: '古着',       bg: '#1a1510', bg2: '#231e17', card: '#2e2620', text: '#f0e6d0', sub: '#a09070', accent: '#d4a76a', accent2: '#c084a0', border: '#d4a76a33' },
 }
 
-export default function Zinyoku() {
+const DEFAULT_MESSAGES = [
+  'だめだよ、我慢して！',
+  'ここで負けたら後悔するよ？',
+  'あなたならできる、信じてる！',
+  'もう少しだけ耐えて！',
+  '記録を守って！',
+]
+
+export default function Zinyoku({ userId, onLoginRequest }: { userId: string | null; onLoginRequest?: () => void }) {
   const [themeKey, setThemeKey] = useState<ThemeKey>(() => (localStorage.getItem('sz_theme') as ThemeKey) || 'cyber')
   const [startDate, setStartDate] = useState(() => localStorage.getItem('sz_start') || new Date().toISOString())
   const [goal, setGoal] = useState(() => Number(localStorage.getItem('sz_goal') || 10))
@@ -56,14 +65,84 @@ export default function Zinyoku() {
   const [showGoal, setShowGoal] = useState(false)
   const [goalInput, setGoalInput] = useState(String(goal))
   const [calMonth, setCalMonth] = useState(new Date())
+  const [charName, setCharName] = useState(() => localStorage.getItem('sz_charname') || '')
+  const [userName, setUserName] = useState(() => localStorage.getItem('sz_username') || '')
+  const [charImage, setCharImage] = useState(() => localStorage.getItem('sz_charimage') || '')
+  const [messages, setMessages] = useState<string[]>(() => JSON.parse(localStorage.getItem('sz_messages') || JSON.stringify(DEFAULT_MESSAGES)))
+  const [msgIdx, setMsgIdx] = useState(0)
+  const [newMsg, setNewMsg] = useState('')
+  const [editingChar, setEditingChar] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   const s = THEMES[themeKey]
 
-  useEffect(() => { const t = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(t) }, [])
+  // タイマー
+  useEffect(() => {
+    const t = setInterval(() => {
+      setNow(Date.now())
+      setMsgIdx(i => (i + 1) % messages.length)
+    }, 5000)
+    return () => clearInterval(t)
+  }, [messages.length])
+
+  // テーマ保存
   useEffect(() => { localStorage.setItem('sz_theme', themeKey) }, [themeKey])
+
+  // localStorage保存（ゲスト・ログイン共通）
   useEffect(() => { localStorage.setItem('sz_start', startDate) }, [startDate])
   useEffect(() => { localStorage.setItem('sz_goal', String(goal)) }, [goal])
   useEffect(() => { localStorage.setItem('sz_records', JSON.stringify(records)) }, [records])
+  useEffect(() => { localStorage.setItem('sz_charname', charName) }, [charName])
+  useEffect(() => { localStorage.setItem('sz_username', userName) }, [userName])
+  useEffect(() => { localStorage.setItem('sz_charimage', charImage) }, [charImage])
+  useEffect(() => { localStorage.setItem('sz_messages', JSON.stringify(messages)) }, [messages])
+
+  // Supabaseからデータ読み込み（ログイン時のみ）
+  useEffect(() => {
+    if (!userId) { setLoaded(true); return }
+    const load = async () => {
+      const { data } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .single()
+      if (data) {
+        if (data.start_date) setStartDate(data.start_date)
+        if (data.goal_days) { setGoal(data.goal_days); setGoalInput(String(data.goal_days)) }
+        if (data.char_name) setCharName(data.char_name)
+        if (data.username) setUserName(data.username)
+        if (data.char_image) setCharImage(data.char_image)
+        if (data.messages?.length) setMessages(data.messages)
+      }
+      const { data: recs } = await supabase
+        .from('records')
+        .select('*')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+      if (recs) setRecords(recs.map(r => ({
+        startDate: r.start_date,
+        endDate: r.end_date,
+        days: r.days,
+      })))
+      setLoaded(true)
+    }
+    load()
+  }, [userId])
+
+  // Supabaseにプロフィール保存（ログイン時のみ）
+  useEffect(() => {
+    if (!loaded || !userId) return
+    supabase.from('profiles').upsert({
+      id: userId,
+      start_date: startDate,
+      goal_days: goal,
+      char_name: charName,
+      username: userName,
+      char_image: charImage,
+      messages,
+    }).then(() => {})
+  }, [startDate, goal, charName, userName, charImage, messages, loaded, userId])
 
   const elapsed = now - new Date(startDate).getTime()
   const days = Math.floor(elapsed / 86400000)
@@ -74,10 +153,32 @@ export default function Zinyoku() {
   const progress = Math.min((days / goal) * 100, 100)
   const today = new Date()
 
-  const reset = () => {
+  const reset = async () => {
     if (!confirm('リセットしますか？記録に残ります。')) return
-    setRecords(p => [...p, { startDate, endDate: new Date().toISOString(), days }])
+    const newRec = { startDate, endDate: new Date().toISOString(), days }
+    setRecords(p => [...p, newRec])
+    if (userId) {
+      await supabase.from('records').insert({
+        user_id: userId,
+        start_date: startDate,
+        end_date: newRec.endDate,
+        days,
+      })
+    }
     setStartDate(new Date().toISOString())
+  }
+
+  const handleImage = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => setCharImage(reader.result as string)
+    reader.readAsDataURL(file)
+  }
+
+  const logout = async () => {
+    await supabase.auth.signOut()
+    window.location.reload()
   }
 
   const failDates = new Set(records.map(r => r.endDate.slice(0, 10)))
@@ -92,19 +193,28 @@ export default function Zinyoku() {
     successDates.add(d.toISOString().slice(0, 10))
 
   const glowStyle = { textShadow: `0 0 20px ${s.accent}, 0 0 40px ${s.accent}88` }
-  const cardStyle = { background: s.card, border: `1px solid ${s.border}`, borderRadius: 16, padding: 16, marginBottom: 12 }
+  const cardStyle: React.CSSProperties = { background: s.card, border: `1px solid ${s.border}`, borderRadius: 16, padding: 16, marginBottom: 12 }
+  const currentMsg = messages.length > 0
+    ? messages[msgIdx % messages.length].replace('{name}', userName)
+    : ''
 
   const CyberButton = ({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) => (
     <button onClick={onClick} style={{
       background: 'transparent', border: `1px solid ${s.accent}88`, borderRadius: 8,
       padding: '14px 8px', cursor: 'pointer', color: s.text, fontSize: 11,
       display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-      position: 'relative', overflow: 'hidden', transition: 'all 0.2s',
+      position: 'relative', overflow: 'hidden',
     }}>
       <span style={{ fontSize: 24, filter: `drop-shadow(0 0 6px ${s.accent})` }}>{icon}</span>
       <span style={{ color: s.sub, letterSpacing: 1 }}>{label}</span>
       <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 1, background: `linear-gradient(90deg, transparent, ${s.accent}, transparent)` }} />
     </button>
+  )
+
+  if (!loaded) return (
+    <div style={{ background: s.bg, minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: s.accent, fontFamily: 'monospace' }}>
+      LOADING...
+    </div>
   )
 
   return (
@@ -113,20 +223,97 @@ export default function Zinyoku() {
       {/* ヘッダー */}
       <div style={{ borderBottom: `1px solid ${s.border}`, padding: '12px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ fontSize: 11, color: s.accent, letterSpacing: 3 }}>ABSTINENCE.SYS</div>
-        <div style={{ fontSize: 11, color: s.sub }}>v1.0</div>
+        {userId
+          ? <button onClick={logout} style={{ background: 'none', border: 'none', color: s.sub, cursor: 'pointer', fontSize: 11, fontFamily: 'inherit' }}>LOGOUT</button>
+          : <button onClick={onLoginRequest} style={{ background: 'none', border: `1px solid ${s.accent}88`, borderRadius: 6, padding: '4px 10px', color: s.accent, cursor: 'pointer', fontSize: 10, fontFamily: 'inherit', letterSpacing: 1 }}>[ LOGIN ]</button>
+        }
       </div>
+
+      {/* ゲストバナー */}
+      {!userId && (
+        <div style={{ background: s.accent + '11', borderBottom: `1px solid ${s.accent}33`, padding: '8px 16px', fontSize: 11, color: s.accent, textAlign: 'center', cursor: 'pointer' }} onClick={onLoginRequest}>
+          ログインすると別端末でもデータを引き継げます →
+        </div>
+      )}
 
       <div style={{ padding: '1.5rem 1rem' }}>
 
         {/* ホーム */}
         {tab === 'home' && (
           <div>
-            {/* メインカウンター */}
-            <div style={{ ...cardStyle, textAlign: 'center', padding: '2rem 1rem' }}>
-              <div style={{ fontSize: 11, color: s.sub, letterSpacing: 4, marginBottom: 16 }}>DAYS // ELAPSED</div>
-              <div style={{ fontSize: 96, fontWeight: 700, lineHeight: 1, color: s.accent, ...glowStyle, fontVariantNumeric: 'tabular-nums' }}>
-                {String(days).padStart(2, '0')}
+            {/* キャラクターカード */}
+            <div style={{ ...cardStyle, display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div onClick={() => setEditingChar(true)} style={{
+                width: 64, height: 64, borderRadius: 12, overflow: 'hidden', flexShrink: 0,
+                border: `2px solid ${s.accent}88`, cursor: 'pointer', background: s.bg2,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+              }}>
+                {charImage
+                  ? <img src={charImage} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                  : <span style={{ fontSize: 28 }}>👤</span>
+                }
               </div>
+              <div style={{ flex: 1, position: 'relative' }}>
+                <div style={{ position: 'absolute', left: -8, top: '50%', transform: 'translateY(-50%)', width: 0, height: 0, borderTop: '6px solid transparent', borderBottom: '6px solid transparent', borderRight: `8px solid ${s.accent}44` }} />
+                <div style={{ background: s.bg2, border: `1px solid ${s.accent}44`, borderRadius: 10, padding: '10px 12px', fontSize: 13, lineHeight: 1.6 }}>
+                  {charName && <div style={{ fontSize: 10, color: s.accent, letterSpacing: 2, marginBottom: 4 }}>{charName}</div>}
+                  <div style={{ color: s.text }}>
+                    {userName && <span style={{ color: s.accent2 }}>{userName}、</span>}
+                    {currentMsg || 'メッセージを設定してください'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* キャラ設定 */}
+            {editingChar && (
+              <div style={{ ...cardStyle, border: `1px solid ${s.accent}` }}>
+                <div style={{ fontSize: 10, color: s.accent, letterSpacing: 3, marginBottom: 12 }}>// CHAR CONFIG</div>
+                <div style={{ display: 'flex', gap: 10, marginBottom: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: s.sub, marginBottom: 4 }}>あなたの名前</div>
+                    <input value={userName} onChange={e => setUserName(e.target.value)} placeholder="例: たろう"
+                      style={{ width: '100%', padding: 8, background: s.bg2, border: `1px solid ${s.border}`, borderRadius: 6, color: s.text, fontFamily: 'inherit', fontSize: 13 }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 10, color: s.sub, marginBottom: 4 }}>キャラ名</div>
+                    <input value={charName} onChange={e => setCharName(e.target.value)} placeholder="例: ミク"
+                      style={{ width: '100%', padding: 8, background: s.bg2, border: `1px solid ${s.border}`, borderRadius: 6, color: s.text, fontFamily: 'inherit', fontSize: 13 }} />
+                  </div>
+                </div>
+                <input ref={fileRef} type="file" accept="image/*" onChange={handleImage} style={{ display: 'none' }} />
+                <button onClick={() => fileRef.current?.click()} style={{
+                  width: '100%', padding: 8, background: 'transparent', border: `1px solid ${s.border}`,
+                  borderRadius: 6, color: s.sub, cursor: 'pointer', fontFamily: 'inherit', fontSize: 12, marginBottom: 10
+                }}>
+                  {charImage ? '画像を変更' : '画像をアップロード'}
+                </button>
+                <div style={{ fontSize: 10, color: s.sub, letterSpacing: 2, marginBottom: 4 }}>// MESSAGES</div>
+                <div style={{ fontSize: 10, color: s.sub, marginBottom: 8 }}>{'{name}'} と書くとあなたの名前に変わります</div>
+                {messages.map((m, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                    <div style={{ flex: 1, padding: '6px 10px', background: s.bg2, border: `1px solid ${s.border}`, borderRadius: 6, fontSize: 12, color: s.text }}>{m}</div>
+                    <button onClick={() => setMessages(msgs => msgs.filter((_, j) => j !== i))}
+                      style={{ background: 'none', border: 'none', color: '#ff4466', cursor: 'pointer', fontSize: 16 }}>×</button>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+                  <input value={newMsg} onChange={e => setNewMsg(e.target.value)} placeholder="新しいメッセージ..."
+                    style={{ flex: 1, padding: 8, background: s.bg2, border: `1px solid ${s.border}`, borderRadius: 6, color: s.text, fontFamily: 'inherit', fontSize: 12 }} />
+                  <button onClick={() => { if (newMsg.trim()) { setMessages(m => [...m, newMsg.trim()]); setNewMsg('') } }}
+                    style={{ padding: '8px 14px', background: 'transparent', border: `1px solid ${s.accent}`, borderRadius: 6, color: s.accent, cursor: 'pointer', fontFamily: 'inherit' }}>+</button>
+                </div>
+                <button onClick={() => setEditingChar(false)} style={{
+                  marginTop: 12, width: '100%', padding: 10, background: 'transparent',
+                  border: `1px solid ${s.accent}`, borderRadius: 6, color: s.accent, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: 2
+                }}>[ SAVE ]</button>
+              </div>
+            )}
+
+            {/* カウンター */}
+            <div style={{ ...cardStyle, textAlign: 'center', padding: '1.5rem 1rem' }}>
+              <div style={{ fontSize: 11, color: s.sub, letterSpacing: 4, marginBottom: 12 }}>DAYS // ELAPSED</div>
+              <div style={{ fontSize: 88, fontWeight: 700, lineHeight: 1, color: s.accent, ...glowStyle }}>{String(days).padStart(2, '0')}</div>
               <div style={{ display: 'flex', justifyContent: 'center', gap: 4, marginTop: 12, fontSize: 13 }}>
                 <span style={{ color: s.accent }}>{String(hours).padStart(2,'0')}</span>
                 <span style={{ color: s.sub }}>:</span>
@@ -147,7 +334,7 @@ export default function Zinyoku() {
             </div>
 
             {/* プログレスバー */}
-            <div style={{ ...cardStyle }}>
+            <div style={cardStyle}>
               <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: s.sub, marginBottom: 8 }}>
                 <span>TARGET // {goal} DAYS</span>
                 <span>{Math.round(progress)}%</span>
@@ -161,7 +348,7 @@ export default function Zinyoku() {
             </div>
 
             {/* ボタン */}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10, marginTop: 8 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
               <CyberButton icon="⏻" label="RESET" onClick={reset} />
               <CyberButton icon="◎" label="TARGET" onClick={() => setShowGoal(v => !v)} />
               <CyberButton icon="↗" label="SHARE" onClick={() => navigator.share?.({ text: `禁欲${days}日達成！` })} />
